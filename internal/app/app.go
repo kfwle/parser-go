@@ -6,6 +6,7 @@ package app
 import (
 	"bufio"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,6 +37,10 @@ func New(cfg config.Config, paths *config.Paths) *App {
 func (a *App) RunOnce(ctx context.Context) error {
 	if err := a.Paths.EnsureDirs(); err != nil {
 		return err
+	}
+	if !a.HasWork() {
+		PrintNoWorkHelp(a.Paths)
+		return ErrNoWork
 	}
 	logx.Println("\n" + strings.Repeat("=", 60))
 	logx.Println(" ЗАПУСК ПАРСЕРА")
@@ -177,7 +182,11 @@ func (a *App) RunOnce(ctx context.Context) error {
 // RunLoop repeats RunOnce until the context is cancelled or SingleCycle is set.
 func (a *App) RunLoop(ctx context.Context) error {
 	for {
-		if err := a.RunOnce(ctx); err != nil {
+		err := a.RunOnce(ctx)
+		if err != nil {
+			if errors.Is(err, ErrNoWork) {
+				return ErrNoWork
+			}
 			logx.Printf("Ошибка цикла: %v\n", err)
 		}
 		if ctx.Err() != nil || a.Cfg.SingleCycle {

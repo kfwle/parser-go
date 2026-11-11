@@ -53,7 +53,6 @@ func waitRest(ctx context.Context, minutes int) {
 }
 
 func mainMenu(ctx context.Context, cfg *config.Config, paths *config.Paths, cfgFile string) {
-	ensureCores(ctx, paths)
 	for {
 		if ctx.Err() != nil {
 			return
@@ -65,12 +64,19 @@ func mainMenu(ctx context.Context, cfg *config.Config, paths *config.Paths, cfgF
 		logx.Println("2. Одиночный цикл (тест)")
 		logx.Println("3. Настройки парсера")
 		logx.Println("4. Инструменты")
-		logx.Println("5. Выход")
+		logx.Println("5. Импорт данных из старой Python-версии")
+		logx.Println("6. Выход")
 		logx.Println(strings.Repeat("=", 60))
-		fmt.Print("Выберите пункт (1-5): ")
+		fmt.Print("Выберите пункт (1-6): ")
 		choice := readLine()
 		switch choice {
 		case "1":
+			if !app.New(*cfg, paths).HasWork() {
+				app.PrintNoWorkHelp(paths)
+				promptEnter()
+				continue
+			}
+			ensureCores(ctx, paths)
 			if cfg.Cycles == 0 {
 				logx.Println("Запуск парсера в бесконечном режиме...")
 				_ = app.New(*cfg, paths).RunLoop(ctx)
@@ -91,6 +97,12 @@ func mainMenu(ctx context.Context, cfg *config.Config, paths *config.Paths, cfgF
 			}
 			promptEnter()
 		case "2":
+			if !app.New(*cfg, paths).HasWork() {
+				app.PrintNoWorkHelp(paths)
+				promptEnter()
+				continue
+			}
+			ensureCores(ctx, paths)
 			logx.Println("Одиночный тестовый цикл...")
 			single := *cfg
 			single.SingleCycle = true
@@ -103,6 +115,8 @@ func mainMenu(ctx context.Context, cfg *config.Config, paths *config.Paths, cfgF
 		case "4":
 			toolsMenu(ctx, paths)
 		case "5":
+			importMenu(paths, cfg, cfgFile)
+		case "6":
 			logx.Println("Выход.")
 			return
 		default:

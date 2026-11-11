@@ -113,6 +113,12 @@ func Apply(cleanFile, wlFile, blFile string, opt Options) (Stats, error) {
 	}
 	logx.Printf("Загружено IP-префиксов: %d\n", len(ipSet))
 	logx.Printf("Загружено SNI: %d\n", len(sniSet))
+	if opt.FilterIP && len(ipSet) == 0 {
+		logx.Println("[!] IP-список пуст: по IP в whitelist не попадёт ни один конфиг.")
+	}
+	if opt.FilterSNI && len(sniSet) == 0 {
+		logx.Println("[!] SNI-список пуст: по SNI в whitelist не попадёт ни один конфиг.")
+	}
 
 	configs, err := dedup.ReadLines(cleanFile)
 	if err != nil {

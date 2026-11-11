@@ -63,7 +63,7 @@ func (a *App) loadHTTPSources(ctx context.Context) {
 		sources = append(sources, line)
 	}
 	if len(sources) == 0 {
-		logx.Println("  Нет источников для обработки.")
+		logx.Printf("  Нет источников для обработки: %s пуст или все ссылки в чёрном списке.\n", a.Paths.SourcesFile)
 		return
 	}
 	logx.Verbosef("  После чёрного списка: %d\n", len(sources))

@@ -56,3 +56,26 @@ func toolsMenu(ctx context.Context, paths *config.Paths) {
 func toolsFilterSources(ctx context.Context, paths *config.Paths) error {
 	return tools.FilterSources(ctx, paths)
 }
+
+// importMenu copies sources and settings from the original Python directory.
+func importMenu(paths *config.Paths, cfg *config.Config, cfgFile string) {
+	fmt.Print("Путь к папке старой версии (где лежит sources/sources.txt): ")
+	from := strings.TrimSpace(readLine())
+	if from == "" {
+		return
+	}
+	report, err := tools.Migrate(from, paths, false)
+	if err != nil {
+		logx.Printf("[!] %v\n", err)
+		promptEnter()
+		return
+	}
+	if len(report.Copied) > 0 {
+		if fresh, err := config.Load(cfgFile); err == nil {
+			*cfg = fresh
+			logx.SetVerbose(cfg.Verbose)
+			logx.Printf("Настройки перечитаны: %s\n", cfgFile)
+		}
+	}
+	promptEnter()
+}

@@ -14,9 +14,10 @@ import (
 	"github.com/kfwle/parser-go/internal/checker"
 	"github.com/kfwle/parser-go/internal/config"
 	"github.com/kfwle/parser-go/internal/logx"
+	"github.com/kfwle/parser-go/internal/tools"
 )
 
-const version = "1.0.0"
+const version = "1.0.1"
 
 func main() {
 	os.Exit(run())
@@ -25,6 +26,7 @@ func main() {
 func run() int {
 	dir := flag.String("dir", ".", "рабочая папка с config.json, sources, cores")
 	configPath := flag.String("config", "", "путь к config.json (по умолчанию <dir>/config.json)")
+	force := flag.Bool("force", false, "перезаписывать существующие файлы при migrate")
 	showVersion := flag.Bool("version", false, "показать версию")
 	flag.Usage = usage
 	flag.Parse()
@@ -45,6 +47,7 @@ func run() int {
 		return 1
 	}
 	logx.SetVerbose(cfg.Verbose)
+	logx.Printf("Рабочая папка: %s\n", paths.Base)
 	if !fileExists(cfgFile) {
 		if err := cfg.Save(cfgFile); err != nil {
 			logx.Printf("[!] Не удалось создать %s: %v\n", cfgFile, err)
@@ -83,6 +86,10 @@ func run() int {
 		mainMenu(ctx, &cfg, paths, cfgFile)
 		return 0
 	case "once":
+		if !app.New(cfg, paths).HasWork() {
+			app.PrintNoWorkHelp(paths)
+			return 1
+		}
 		ensureCores(ctx, paths)
 		if err := app.New(cfg, paths).RunOnce(ctx); err != nil {
 			logx.Printf("[!] %v\n", err)
@@ -90,9 +97,24 @@ func run() int {
 		}
 		return 0
 	case "loop":
+		if !app.New(cfg, paths).HasWork() {
+			app.PrintNoWorkHelp(paths)
+			return 1
+		}
 		ensureCores(ctx, paths)
 		cfg.SingleCycle = false
 		if err := app.New(cfg, paths).RunLoop(ctx); err != nil {
+			logx.Printf("[!] %v\n", err)
+			return 1
+		}
+		return 0
+	case "migrate":
+		from := flag.Arg(1)
+		if from == "" {
+			logx.Println("[!] Укажите папку старой версии: parser-go -dir <рабочая> migrate <папка RKP_Parser5.0.1>")
+			return 2
+		}
+		if _, err := tools.Migrate(from, paths, *force); err != nil {
 			logx.Printf("[!] %v\n", err)
 			return 1
 		}
@@ -128,6 +150,7 @@ func usage() {
   menu            интерактивное меню (по умолчанию в терминале)
   once            один полный цикл парсинга
   loop            циклы с паузами (cycles/rest_time)
+  migrate <dir>   импорт sources/config из старой Python-версии
   settings        редактирование config.json
   tools           сервисные инструменты
   filter-sources  оставить в sources.txt только рабочие источники
