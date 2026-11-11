@@ -44,6 +44,15 @@ Python-версия использовала Telethon и MTProto. Go-верси�
 - настройка `download_files_tg` остаётся для совместимости и игнорируется;
 - остальные флаги (`save_*_tg`, `decode_*_tg`, `decrypt_happ_tg`, `save_sources_tg`) работают как раньше.
 
+## Готовые бинарники
+
+Готовые сборки для Linux, macOS и Windows (amd64/arm64) лежат в [Releases](https://github.com/kfwle/parser-go/releases). Скачайте файл под свою ОС и запускайте:
+
+```bash
+chmod +x parser-go-linux-amd64
+./parser-go-linux-amd64
+```
+
 ## Сборка
 
 Нужен Go **1.26+**.
