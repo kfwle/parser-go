@@ -38,9 +38,10 @@ type Detector struct {
 	paths    *config.Paths
 	useMaxDB bool
 
-	once   sync.Once
-	reader *maxminddb.Reader
-	dbErr  error
+	mu          sync.Mutex
+	lastAttempt time.Time
+	reader      *maxminddb.Reader
+	dbErr       error
 }
 
 // New creates a country detector.
@@ -162,33 +163,55 @@ func (d *Detector) detectMaxmind(ctx context.Context, host string) (Info, bool) 
 	return Info{Name: name, Code: code}, true
 }
 
+// Close releases the MaxMind reader. It is safe to call when no database was
+// opened (for example in API mode).
+func (d *Detector) Close() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.reader != nil {
+		err := d.reader.Close()
+		d.reader = nil
+		return err
+	}
+	return nil
+}
+
 func (d *Detector) openDB(ctx context.Context) (*maxminddb.Reader, error) {
-	d.once.Do(func() {
-		if _, err := os.Stat(d.paths.MaxmindDB); err != nil {
-			logx.Println("Скачивание MaxMind GeoLite2-Country базы данных...")
-			data, err := fetch.Get(ctx, maxmindURL, 180*time.Second, nil)
-			if err != nil {
-				d.dbErr = fmt.Errorf("download: %w", err)
-				return
-			}
-			if err := os.MkdirAll(d.paths.TempDir, 0o755); err != nil {
-				d.dbErr = err
-				return
-			}
-			if err := os.WriteFile(d.paths.MaxmindDB, []byte(data), 0o644); err != nil {
-				d.dbErr = err
-				return
-			}
-			logx.Printf("База данных MaxMind сохранена: %s\n", d.paths.MaxmindDB)
-		}
-		reader, err := maxminddb.Open(d.paths.MaxmindDB)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.reader != nil {
+		return d.reader, nil
+	}
+	// Do not cache a transient failure forever: retry after a minute.
+	if d.dbErr != nil && time.Since(d.lastAttempt) < time.Minute {
+		return nil, d.dbErr
+	}
+	d.lastAttempt = time.Now()
+	d.dbErr = nil
+	if _, err := os.Stat(d.paths.MaxmindDB); err != nil {
+		logx.Println("Скачивание MaxMind GeoLite2-Country базы данных...")
+		data, err := fetch.GetSecure(ctx, maxmindURL, 180*time.Second, nil)
 		if err != nil {
-			d.dbErr = err
-			return
+			d.dbErr = fmt.Errorf("download: %w", err)
+			return nil, d.dbErr
 		}
-		d.reader = reader
-	})
-	return d.reader, d.dbErr
+		if err := os.MkdirAll(d.paths.TempDir, 0o755); err != nil {
+			d.dbErr = err
+			return nil, d.dbErr
+		}
+		if err := os.WriteFile(d.paths.MaxmindDB, []byte(data), 0o644); err != nil {
+			d.dbErr = err
+			return nil, d.dbErr
+		}
+		logx.Printf("База данных MaxMind сохранена: %s\n", d.paths.MaxmindDB)
+	}
+	reader, err := maxminddb.Open(d.paths.MaxmindDB)
+	if err != nil {
+		d.dbErr = err
+		return nil, d.dbErr
+	}
+	d.reader = reader
+	return reader, nil
 }
 
 // UpdateURLTag replaces the fragment with flag, country name and project tag.
@@ -197,6 +220,7 @@ func UpdateURLTag(raw string, info *Info, encode bool) string {
 	if info != nil && info.Name != "" && info.Code != "" {
 		tag = fmt.Sprintf("%s %s [#РКП]", FlagEmoji(info.Code), info.Name)
 	}
+	tag = sanitizeTag(tag)
 	encoded := tag
 	if encode {
 		encoded = extract.PercentEncode(tag)
@@ -206,6 +230,22 @@ func UpdateURLTag(raw string, info *Info, encode bool) string {
 		base = base[:i]
 	}
 	return base + "#" + encoded
+}
+
+// sanitizeTag prevents newline/tag injection from an untrusted proxy API
+// response, even when encode_names is disabled.
+func sanitizeTag(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' || r < ' ' || r == 0x7f || r == '#' {
+			return ' '
+		}
+		return r
+	}, s)
+	s = strings.TrimSpace(s)
+	if runes := []rune(s); len(runes) > 100 {
+		s = string(runes[:100])
+	}
+	return s
 }
 
 // FlagEmoji returns the regional-indicator flag for a two-letter country code.

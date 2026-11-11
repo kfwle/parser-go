@@ -3,6 +3,9 @@ package checker
 import (
 	"archive/zip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -86,14 +89,16 @@ func EnsureCores(ctx context.Context, paths *config.Paths) error {
 	downloaded := false
 	if !fileExists(paths.XrayPath) {
 		logx.Printf("[+] Xray-core не найден. Скачиваю (%s/%s)...\n", runtime.GOOS, runtime.GOARCH)
-		if err := downloadArchive(ctx, xrayDownloadURL(), paths.XrayPath, "xray"+exeSuffix()); err != nil {
+		if err := downloadArchive(ctx, "XTLS/Xray-core", xrayAsset(), xrayDownloadURL(),
+			paths.XrayPath, "xray"+exeSuffix()); err != nil {
 			return fmt.Errorf("xray: %w", err)
 		}
 		downloaded = true
 	}
 	if !fileExists(paths.Hysteria2Path) {
 		logx.Println("[+] Hysteria2 не найден. Скачиваю...")
-		if err := downloadFile(ctx, hysteriaDownloadURL(), paths.Hysteria2Path); err != nil {
+		if err := downloadFile(ctx, "apernet/hysteria", hysteriaAsset(), hysteriaDownloadURL(),
+			paths.Hysteria2Path); err != nil {
 			return fmt.Errorf("hysteria2: %w", err)
 		}
 		downloaded = true
@@ -109,61 +114,115 @@ func EnsureCores(ctx context.Context, paths *config.Paths) error {
 	return nil
 }
 
-// UpdateCores forces a re-download of both cores.
+// UpdateCores forces a re-download of both cores. New binaries are downloaded
+// next to the old ones and only replace them after both downloads succeed.
 func UpdateCores(ctx context.Context, paths *config.Paths) error {
-	for _, p := range []string{paths.XrayPath, paths.Hysteria2Path} {
-		if fileExists(p) {
-			if err := os.Remove(p); err != nil {
-				return fmt.Errorf("remove %s: %w", p, err)
-			}
-			logx.Printf("  Удалён старый: %s\n", p)
-		}
+	if err := paths.EnsureDirs(); err != nil {
+		return err
 	}
-	return EnsureCores(ctx, paths)
+	newXray := paths.XrayPath + ".new"
+	newHy2 := paths.Hysteria2Path + ".new"
+	_ = os.Remove(newXray)
+	_ = os.Remove(newHy2)
+	defer os.Remove(newXray)
+	defer os.Remove(newHy2)
+
+	if err := downloadArchive(ctx, "XTLS/Xray-core", xrayAsset(), xrayDownloadURL(),
+		newXray, "xray"+exeSuffix()); err != nil {
+		return fmt.Errorf("xray: %w", err)
+	}
+	if err := downloadFile(ctx, "apernet/hysteria", hysteriaAsset(), hysteriaDownloadURL(),
+		newHy2); err != nil {
+		return fmt.Errorf("hysteria2: %w", err)
+	}
+	if runtime.GOOS != "windows" {
+		_ = os.Chmod(newXray, 0o755)
+		_ = os.Chmod(newHy2, 0o755)
+	}
+	if err := replaceFile(newXray, paths.XrayPath); err != nil {
+		return fmt.Errorf("replace xray: %w", err)
+	}
+	if err := replaceFile(newHy2, paths.Hysteria2Path); err != nil {
+		return fmt.Errorf("replace hysteria2: %w", err)
+	}
+	logx.Println("Ядра успешно обновлены.")
+	return nil
 }
 
-func downloadFile(ctx context.Context, rawURL, dest string) error {
-	return downloadWithRetries(ctx, rawURL, func(body io.Reader, size int64) error {
-		return writeFileFromReader(dest, body, size)
-	})
+// maxCoreBytes limits both the downloaded archive and each extracted file.
+const maxCoreBytes = 256 << 20
+
+func downloadFile(ctx context.Context, repo, assetName, fallbackURL, dest string) error {
+	rawURL, digest := resolveReleaseAsset(ctx, repo, assetName, fallbackURL)
+	return downloadWithRetries(ctx, rawURL, digest, dest)
 }
 
-func downloadArchive(ctx context.Context, rawURL, dest, innerName string) error {
+func downloadArchive(ctx context.Context, repo, assetName, fallbackURL, dest, innerName string) error {
+	rawURL, digest := resolveReleaseAsset(ctx, repo, assetName, fallbackURL)
 	zipPath := dest + ".zip"
-	err := downloadWithRetries(ctx, rawURL, func(body io.Reader, size int64) error {
-		return writeFileFromReader(zipPath, body, size)
-	})
-	if err != nil {
+	if err := downloadWithRetries(ctx, rawURL, digest, zipPath); err != nil {
 		return err
 	}
 	defer os.Remove(zipPath)
-	zr, err := zip.OpenReader(zipPath)
-	if err != nil {
-		return fmt.Errorf("open zip: %w", err)
-	}
-	defer zr.Close()
-	for _, file := range zr.File {
-		if filepath.Base(file.Name) != innerName {
-			continue
-		}
-		rc, err := file.Open()
-		if err != nil {
-			return err
-		}
-		defer rc.Close()
-		if err := writeFileFromReader(dest, rc, int64(file.UncompressedSize64)); err != nil {
-			return err
-		}
-		return nil
-	}
-	return fmt.Errorf("file %q not found in archive", innerName)
+	return extractZipFile(zipPath, dest, innerName)
 }
 
-func downloadWithRetries(ctx context.Context, rawURL string, write func(io.Reader, int64) error) error {
+type releaseResponse struct {
+	Assets []struct {
+		Name   string `json:"name"`
+		URL    string `json:"browser_download_url"`
+		Digest string `json:"digest"`
+	} `json:"assets"`
+}
+
+// resolveReleaseAsset asks the GitHub API for the asset URL and its SHA-256
+// digest. If the API is unavailable (rate limit/network), it falls back to the
+// public download URL; TLS verification still protects that path.
+func resolveReleaseAsset(ctx context.Context, repo, assetName, fallbackURL string) (string, string) {
+	apiCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(apiCtx, http.MethodGet,
+		"https://api.github.com/repos/"+repo+"/releases/latest", nil)
+	if err != nil {
+		return fallbackURL, ""
+	}
+	req.Header.Set("User-Agent", fetch.DefaultUserAgent)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := fetch.SecureClient.Do(req)
+	if err != nil {
+		logx.Verbosef("  GitHub API недоступен (%v), проверяю только TLS\n", err)
+		return fallbackURL, ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		logx.Verbosef("  GitHub API: HTTP %d, проверяю только TLS\n", resp.StatusCode)
+		return fallbackURL, ""
+	}
+	var data releaseResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&data); err != nil {
+		logx.Verbosef("  GitHub API: %v, проверяю только TLS\n", err)
+		return fallbackURL, ""
+	}
+	for _, asset := range data.Assets {
+		if asset.Name == assetName && asset.URL != "" {
+			return asset.URL, strings.TrimPrefix(asset.Digest, "sha256:")
+		}
+	}
+	return fallbackURL, ""
+}
+
+type barWriter struct{ bar *logx.Bar }
+
+func (w barWriter) Write(p []byte) (int, error) {
+	w.bar.Add(int64(len(p)))
+	return len(p), nil
+}
+
+func downloadWithRetries(ctx context.Context, rawURL, expectedSHA256, dest string) error {
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
 		logx.Printf("  Загрузка: %s\n", rawURL)
-		err := downloadOnce(ctx, rawURL, write)
+		err := downloadOnce(ctx, rawURL, expectedSHA256, dest)
 		if err == nil {
 			return nil
 		}
@@ -180,13 +239,15 @@ func downloadWithRetries(ctx context.Context, rawURL string, write func(io.Reade
 	return lastErr
 }
 
-func downloadOnce(ctx context.Context, rawURL string, write func(io.Reader, int64) error) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+func downloadOnce(ctx context.Context, rawURL, expectedSHA256, dest string) error {
+	dlCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(dlCtx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("User-Agent", fetch.DefaultUserAgent)
-	resp, err := fetch.Client.Do(req)
+	resp, err := fetch.SecureClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -194,19 +255,9 @@ func downloadOnce(ctx context.Context, rawURL string, write func(io.Reader, int6
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	bar := logx.NewBar("Загрузка", resp.ContentLength)
-	defer bar.Finish()
-	return write(io.TeeReader(resp.Body, barWriter{bar}), resp.ContentLength)
-}
-
-type barWriter struct{ bar *logx.Bar }
-
-func (w barWriter) Write(p []byte) (int, error) {
-	w.bar.Add(int64(len(p)))
-	return len(p), nil
-}
-
-func writeFileFromReader(dest string, r io.Reader, size int64) error {
+	if resp.ContentLength > maxCoreBytes {
+		return fmt.Errorf("файл слишком большой: %d байт", resp.ContentLength)
+	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
@@ -215,16 +266,119 @@ func writeFileFromReader(dest string, r io.Reader, size int64) error {
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(f, r); err != nil {
+	cleanup := func() {
 		f.Close()
 		os.Remove(tmp)
+	}
+	hash := sha256.New()
+	bar := logx.NewBar("Загрузка", resp.ContentLength)
+	defer bar.Finish()
+	written, err := io.Copy(io.MultiWriter(f, hash, barWriter{bar}),
+		io.LimitReader(resp.Body, maxCoreBytes+1))
+	if err != nil {
+		cleanup()
+		return err
+	}
+	if written > maxCoreBytes {
+		cleanup()
+		return fmt.Errorf("файл слишком большой: %d байт", written)
+	}
+	if expectedSHA256 != "" {
+		actual := hex.EncodeToString(hash.Sum(nil))
+		if !strings.EqualFold(actual, expectedSHA256) {
+			cleanup()
+			return fmt.Errorf("SHA-256 не совпал: получено %s, ожидалось %s", actual, expectedSHA256)
+		}
+	}
+	if err := f.Sync(); err != nil {
+		cleanup()
 		return err
 	}
 	if err := f.Close(); err != nil {
 		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, dest)
+	if runtime.GOOS == "windows" {
+		_ = os.Remove(dest)
+	}
+	if err := os.Rename(tmp, dest); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+func extractZipFile(zipPath, dest, innerName string) error {
+	zr, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return fmt.Errorf("open zip: %w", err)
+	}
+	defer zr.Close()
+	for _, file := range zr.File {
+		if filepath.Base(file.Name) != innerName {
+			continue
+		}
+		if file.UncompressedSize64 > maxCoreBytes {
+			return fmt.Errorf("файл в архиве слишком большой: %d байт", file.UncompressedSize64)
+		}
+		rc, err := file.Open()
+		if err != nil {
+			return err
+		}
+		defer rc.Close()
+		if err := writeLimitedFile(dest, rc); err != nil {
+			return err
+		}
+		return nil
+	}
+	return fmt.Errorf("file %q not found in archive", innerName)
+}
+
+func writeLimitedFile(dest string, r io.Reader) error {
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	tmp := dest + ".extract"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	cleanup := func() {
+		f.Close()
+		os.Remove(tmp)
+	}
+	written, err := io.Copy(f, io.LimitReader(r, maxCoreBytes+1))
+	if err != nil {
+		cleanup()
+		return err
+	}
+	if written > maxCoreBytes {
+		cleanup()
+		return fmt.Errorf("извлечённый файл слишком большой")
+	}
+	if err := f.Sync(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if runtime.GOOS == "windows" {
+		_ = os.Remove(dest)
+	}
+	if err := os.Rename(tmp, dest); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+func replaceFile(src, dst string) error {
+	if runtime.GOOS == "windows" {
+		_ = os.Remove(dst)
+	}
+	return os.Rename(src, dst)
 }
 
 // FindHysteria2 returns the configured Hysteria2 binary, falling back to the

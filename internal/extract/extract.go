@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"html"
+	"net"
 	"net/url"
 	"regexp"
 	"sort"
@@ -34,25 +35,25 @@ func CleanText(s string) string {
 	return html.UnescapeString(s)
 }
 
-// CleanURL normalises a config URL: strips invisible characters, HTML entities
-// and repeated percent-encoding (the original parser unquoted twice).
+// CleanURL removes invisible characters and decodes HTML entities. It does NOT
+// percent-decode the whole URL: that corrupts encoded delimiters (%23, %26) and
+// splits the host/query boundary. Individual components are unescaped by the
+// protocol parsers instead.
 func CleanURL(s string) string {
 	s = strings.TrimSpace(s)
 	s = strings.ReplaceAll(s, "\ufeff", "")
 	s = strings.ReplaceAll(s, "\u200b", "")
 	s = strings.NewReplacer("\n", "", "\r", "").Replace(s)
-	for i := 0; i < 2; i++ {
-		s = html.UnescapeString(s)
-		if un, err := url.PathUnescape(s); err == nil {
-			s = un
-		}
-	}
+	s = html.UnescapeString(s)
 	return strings.TrimSpace(s)
 }
 
 // IsValidConfig reports whether s looks like a supported proxy URL.
 func IsValidConfig(s string) bool {
 	s = strings.TrimSpace(s)
+	if len(s) > maxConfigLen {
+		return false
+	}
 	switch {
 	case strings.HasPrefix(strings.ToLower(s), "vless://"):
 		return strings.Contains(s, "@") && uuidRe.MatchString(s)
@@ -78,13 +79,13 @@ func EnsureHashSuffix(s string) string {
 func NormalizeConfig(s string) string {
 	s = strings.TrimSpace(s)
 	if i := strings.IndexByte(s, '#'); i >= 0 {
-		s = s[:i]
+		s = strings.TrimSpace(s[:i])
 	}
 	i := strings.IndexByte(s, '?')
 	if i < 0 {
 		return s
 	}
-	base, query := s[:i], s[i+1:]
+	base, query := strings.TrimSpace(s[:i]), s[i+1:]
 	params := make(map[string]string)
 	for _, part := range strings.Split(query, "&") {
 		if part == "" {
@@ -106,6 +107,9 @@ func NormalizeConfig(s string) string {
 	for _, k := range keys {
 		parts = append(parts, k+"="+params[k])
 	}
+	if len(parts) == 0 {
+		return base
+	}
 	return base + "?" + strings.Join(parts, "&")
 }
 
@@ -121,18 +125,26 @@ func NormalizeSource(raw string) string {
 	return u.String()
 }
 
+// maxConfigLen bounds a single config URL. Hostile subscriptions sometimes
+// contain multi-megabyte "configs" that would otherwise poison list files.
+const maxConfigLen = 16 * 1024
+
 // FindConfigs returns all vless, trojan and hysteria2 URLs found in text.
 func FindConfigs(text string) (vless, trojan, hy2 []string) {
-	if vlessRe.MatchString(text) {
-		vless = vlessRe.FindAllString(text, -1)
-	}
-	if trojanRe.MatchString(text) {
-		trojan = trojanRe.FindAllString(text, -1)
-	}
-	if hy2Re.MatchString(text) {
-		hy2 = hy2Re.FindAllString(text, -1)
-	}
+	vless = filterMatches(vlessRe.FindAllString(text, -1))
+	trojan = filterMatches(trojanRe.FindAllString(text, -1))
+	hy2 = filterMatches(hy2Re.FindAllString(text, -1))
 	return
+}
+
+func filterMatches(matches []string) []string {
+	out := matches[:0]
+	for _, m := range matches {
+		if len(m) <= maxConfigLen {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // FindURLs returns every http(s) URL in text.
@@ -141,8 +153,34 @@ func FindURLs(text string) []string { return urlRe.FindAllString(text, -1) }
 // FindHapp returns happ://cryptN/... links.
 func FindHapp(text string) []string { return happRe.FindAllString(text, -1) }
 
-// ExtractSNI reads the sni or host parameter from a config URL.
+// IsValidHost rejects hosts containing URL delimiters, whitespace or control
+// characters. IPv6 literals (colons) are allowed; brackets are not.
+func IsValidHost(host string) bool {
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	if strings.Contains(host, ":") && net.ParseIP(host) == nil {
+		return false
+	}
+	for _, r := range host {
+		if r <= ' ' || r == 0x7f {
+			return false
+		}
+		switch r {
+		case '@', '#', '?', '/', '\\', '%', '[', ']', '"', '\'', '<', '>', '&', '=', ';', ',':
+			return false
+		}
+	}
+	return true
+}
+
+// ExtractSNI reads the sni or host parameter from a config URL. The fragment is
+// ignored: SNI must come from the query string, otherwise a tag like
+// "#&sni=allowed.example" could bypass the SNI filter.
 func ExtractSNI(raw string) string {
+	if i := strings.IndexByte(raw, '#'); i >= 0 {
+		raw = raw[:i]
+	}
 	m := sniRe.FindStringSubmatch(raw)
 	if len(m) < 2 {
 		return ""
@@ -185,13 +223,13 @@ func HostPort(raw string) (string, int, bool) {
 			return "", 0, false
 		}
 		host = strings.Trim(rest, "[]")
-		if host == "" {
+		if host == "" || !IsValidHost(host) {
 			return "", 0, false
 		}
 		return host, defaultPort, true
 	}
 	port, err := strconv.Atoi(portStr)
-	if err != nil || port < 1 || port > 65535 {
+	if err != nil || port < 1 || port > 65535 || !IsValidHost(host) {
 		return "", 0, false
 	}
 	return host, port, true
@@ -327,6 +365,9 @@ type Result struct {
 func ExtractFromText(text string, opt Options) Result {
 	var res Result
 	add := func(cfg string) {
+		if len(cfg) > maxConfigLen {
+			return
+		}
 		lower := strings.ToLower(cfg)
 		switch {
 		case strings.HasPrefix(lower, "vless://"):

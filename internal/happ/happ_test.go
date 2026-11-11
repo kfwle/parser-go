@@ -139,3 +139,11 @@ func TestUnknownType(t *testing.T) {
 		t.Fatal("non-happ link must fail")
 	}
 }
+
+func TestCrypt5SegmentLengthOverflow(t *testing.T) {
+	shuffled := "abcdefgh" + "123456789012" + "9223372036854775807" + "X" + "AAAA"
+	payload := blockPairSwap(shuffled)
+	if _, err := decryptCrypt5(payload); err == nil {
+		t.Fatal("overflowing segment length must be rejected")
+	}
+}

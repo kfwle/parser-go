@@ -80,8 +80,13 @@ func TestGenerateAllFormats(t *testing.T) {
 	if err := json.Unmarshal(xrayData, &xray); err != nil {
 		t.Fatal(err)
 	}
-	if len(xray.Outbounds) != 3 {
-		t.Fatalf("xray outbounds=%d", len(xray.Outbounds))
+	if len(xray.Outbounds) != 2 {
+		t.Fatalf("xray outbounds=%d (hysteria2 must be excluded)", len(xray.Outbounds))
+	}
+	for _, ob := range xray.Outbounds {
+		if ob["protocol"] == "hysteria2" {
+			t.Fatal("Xray output must not contain hysteria2")
+		}
 	}
 
 	var singbox struct {

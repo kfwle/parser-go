@@ -124,7 +124,7 @@ func (p *Parser) parseChannel(ctx context.Context, name string) (channelResult, 
 		if ctx.Err() != nil {
 			break
 		}
-		body, err := fetch.Get(ctx, pageURL, 20*time.Second, nil)
+		body, err := fetch.GetSecure(ctx, pageURL, 20*time.Second, nil)
 		if err != nil {
 			return out, err
 		}
@@ -197,7 +197,7 @@ func (p *Parser) processMessage(msg message, opt extract.Options, out *channelRe
 	}
 	if p.cfg.DecryptHappTG {
 		for _, link := range extract.FindHapp(text) {
-			decrypted, err := happ.DecryptURL(link)
+			decrypted, err := safeDecryptHapp(link)
 			if err != nil {
 				continue
 			}
@@ -284,15 +284,44 @@ func postID(post string) int64 {
 }
 
 func findMessageText(n *html.Node) *html.Node {
-	if n.Type == html.ElementNode && n.Data == "div" && hasClass(n, "tgme_widget_message_text") {
-		return n
-	}
-	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		if found := findMessageText(c); found != nil {
-			return found
+	var preferred, generic *html.Node
+	var walk func(*html.Node)
+	walk = func(node *html.Node) {
+		if node.Type == html.ElementNode {
+			// Reply previews contain their own tgme_widget_message_text block;
+			// never use the quoted post as the message body.
+			if hasClass(node, "tgme_widget_message_reply") {
+				return
+			}
+			if node.Data == "div" && hasClass(node, "tgme_widget_message_text") {
+				if hasClass(node, "js-message_text") {
+					if preferred == nil {
+						preferred = node
+					}
+				} else if generic == nil {
+					generic = node
+				}
+			}
+		}
+		for c := node.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
 		}
 	}
-	return nil
+	walk(n)
+	if preferred != nil {
+		return preferred
+	}
+	return generic
+}
+
+// safeDecryptHapp guards against a malformed link crashing the whole parser.
+func safeDecryptHapp(link string) (out string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("happ: panic: %v", r)
+		}
+	}()
+	return happ.DecryptURL(link)
 }
 
 func nodeText(n *html.Node) string {

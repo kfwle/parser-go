@@ -54,3 +54,19 @@ func TestParsePage(t *testing.T) {
 		t.Fatalf("bad hrefs %v", messages[0].hrefs)
 	}
 }
+
+func TestReplyPreviewIsNotMessageText(t *testing.T) {
+	page := `<div class="tgme_widget_message js-widget_message" data-post="chan/200">
+	  <a class="tgme_widget_message_reply" href="https://t.me/chan/199">
+	    <div class="tgme_widget_message_text js-message_reply_text">QUOTED OLD TEXT</div>
+	  </a>
+	  <div class="tgme_widget_message_text js-message_text">vless://11111111-2222-3333-4444-555555555555@1.2.3.4:443#real</div>
+	</div>`
+	messages, _, err := parsePage(page)
+	if err != nil || len(messages) != 1 {
+		t.Fatalf("messages=%v err=%v", messages, err)
+	}
+	if !strings.Contains(messages[0].text, "vless://") || strings.Contains(messages[0].text, "QUOTED") {
+		t.Fatalf("wrong message text: %q", messages[0].text)
+	}
+}

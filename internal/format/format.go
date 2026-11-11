@@ -220,7 +220,7 @@ func toClash(ep *model.Endpoint, name string) (clashProxy, bool) {
 		p.Server = ep.Host
 		p.Port = ep.Port
 		p.UUID = ep.ID
-		p.Encryption = "none"
+		p.Encryption = firstNonEmpty(ep.Encryption, "none")
 		tls := ep.Security == "tls" || ep.Security == "reality"
 		p.TLS = &tls
 		p.Servername = firstNonEmpty(ep.SNI, ep.Host)
@@ -230,6 +230,9 @@ func toClash(ep *model.Endpoint, name string) (clashProxy, bool) {
 		}
 		p.Flow = ep.Flow
 		if ep.Security == "reality" {
+			if ep.PublicKey == "" {
+				return clashProxy{}, false
+			}
 			p.RealityOpts = &clashReality{PublicKey: ep.PublicKey, ShortID: ep.ShortID}
 		}
 		applyClashTransport(&p, ep)
@@ -292,7 +295,9 @@ func applyClashTransport(p *clashProxy, ep *model.Endpoint) {
 }
 
 func (g *Generator) writeClash(label string, proxies []clashProxy) error {
+	path := filepath.Join(g.Paths.ClashDir, label+".yaml")
 	if len(proxies) == 0 {
+		_ = os.Remove(path)
 		return nil
 	}
 	names := make([]string, 0, len(proxies))
@@ -323,7 +328,6 @@ func (g *Generator) writeClash(label string, proxies []clashProxy) error {
 	if err := enc.Close(); err != nil {
 		return err
 	}
-	path := filepath.Join(g.Paths.ClashDir, label+".yaml")
 	if err := os.MkdirAll(g.Paths.ClashDir, 0o755); err != nil {
 		return err
 	}
@@ -335,7 +339,9 @@ func (g *Generator) writeClash(label string, proxies []clashProxy) error {
 }
 
 func (g *Generator) writeXray(label string, outbounds []any) error {
+	path := filepath.Join(g.Paths.XrayDir, label+".json")
 	if len(outbounds) == 0 {
+		_ = os.Remove(path)
 		return nil
 	}
 	cfg := map[string]any{
@@ -350,7 +356,6 @@ func (g *Generator) writeXray(label string, outbounds []any) error {
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(g.Paths.XrayDir, label+".json")
 	if err := os.MkdirAll(g.Paths.XrayDir, 0o755); err != nil {
 		return err
 	}
@@ -362,14 +367,15 @@ func (g *Generator) writeXray(label string, outbounds []any) error {
 }
 
 func (g *Generator) writeSingbox(label string, outbounds []any) error {
+	path := filepath.Join(g.Paths.SingboxDir, label+".json")
 	if len(outbounds) == 0 {
+		_ = os.Remove(path)
 		return nil
 	}
 	data, err := json.MarshalIndent(map[string]any{"outbounds": outbounds}, "", "  ")
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(g.Paths.SingboxDir, label+".json")
 	if err := os.MkdirAll(g.Paths.SingboxDir, 0o755); err != nil {
 		return err
 	}

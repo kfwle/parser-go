@@ -3,6 +3,8 @@ package extract
 import (
 	"encoding/json"
 	"fmt"
+	"math"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -124,6 +126,7 @@ func outboundToVLESSURL(out map[string]any) (string, bool) {
 		Network:       strings.ToLower(defString(asString(stream["network"]), "tcp")),
 		Security:      strings.ToLower(asString(stream["security"])),
 		Flow:          asString(user["flow"]),
+		Encryption:    asString(user["encryption"]),
 		Path:          asString(asMap(stream["wsSettings"])["path"]),
 		HostHeader:    headerHost(asMap(asMap(stream["wsSettings"])["headers"])),
 		ServiceName:   asString(asMap(stream["grpcSettings"])["serviceName"]),
@@ -346,6 +349,7 @@ func clashProxyToVLESSURL(proxy map[string]any) (string, bool) {
 		SNI:         defString(asString(proxy["servername"]), asString(proxy["sni"])),
 		Fingerprint: asString(proxy["client-fingerprint"]),
 		Flow:        asString(proxy["flow"]),
+		Encryption:  asString(proxy["encryption"]),
 		ALPN:        strings.Join(asStringSlice(proxy["alpn"]), ","),
 	}
 	if reality := asMap(proxy["reality-opts"]); reality != nil {
@@ -418,17 +422,14 @@ func clashProxyToHysteria2URL(proxy map[string]any) (string, bool) {
 
 // EndpointToURL serialises an Endpoint back into a proxy URL.
 func EndpointToURL(ep *model.Endpoint) string {
-	if ep == nil || ep.Host == "" || ep.Port == 0 {
+	if ep == nil || ep.Port < 1 || ep.Port > 65535 || !IsValidHost(ep.Host) {
 		return ""
 	}
-	host := ep.Host
-	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
-		host = "[" + host + "]"
-	}
+	hostPort := net.JoinHostPort(ep.Host, strconv.Itoa(ep.Port))
 	params := map[string]string{}
 	switch ep.Protocol {
 	case model.VLESS:
-		params["encryption"] = "none"
+		params["encryption"] = defString(ep.Encryption, "none")
 		params["type"] = defString(ep.Network, "tcp")
 		if ep.Flow != "" {
 			params["flow"] = ep.Flow
@@ -439,10 +440,11 @@ func EndpointToURL(ep *model.Endpoint) string {
 			params["pbk"] = ep.PublicKey
 			params["sid"] = ep.ShortID
 			params["fp"] = ep.Fingerprint
-			if ep.ALPN == "" {
-				ep.ALPN = "http/1.1"
+			alpn := ep.ALPN
+			if alpn == "" {
+				alpn = "http/1.1"
 			}
-			params["alpn"] = ep.ALPN
+			params["alpn"] = alpn
 		} else if ep.Security == "tls" {
 			params["security"] = "tls"
 			params["sni"] = ep.SNI
@@ -465,15 +467,25 @@ func EndpointToURL(ep *model.Endpoint) string {
 		case "httpupgrade":
 			params["path"] = ep.Path
 			params["host"] = ep.HostHeader
+		case "kcp":
+			params["headerType"] = ep.HeaderType
+		case "quic":
+			params["quicSecurity"] = ep.QUICSecurity
+			params["key"] = ep.Key
+			params["headerType"] = ep.HeaderType
 		}
 		query := buildQuery(params)
 		if query != "" {
 			query = "?" + query
 		}
-		return "vless://" + percentEncode(ep.ID) + "@" + host + ":" + strconv.Itoa(ep.Port) + query + tagSuffix(ep.Tag)
+		return "vless://" + percentEncode(ep.ID) + "@" + hostPort + query + tagSuffix(ep.Tag)
 	case model.Trojan:
 		if ep.Security != "tls" {
 			params["security"] = ep.Security
+		}
+		if ep.Security == "reality" {
+			params["pbk"] = ep.PublicKey
+			params["sid"] = ep.ShortID
 		}
 		params["sni"] = ep.SNI
 		params["fp"] = ep.Fingerprint
@@ -493,7 +505,7 @@ func EndpointToURL(ep *model.Endpoint) string {
 		if query != "" {
 			query = "?" + query
 		}
-		return "trojan://" + percentEncode(ep.ID) + "@" + host + ":" + strconv.Itoa(ep.Port) + query + tagSuffix(ep.Tag)
+		return "trojan://" + percentEncode(ep.ID) + "@" + hostPort + query + tagSuffix(ep.Tag)
 	case model.Hysteria2:
 		params["sni"] = ep.SNI
 		params["insecure"] = boolParam(ep.Insecure)
@@ -512,7 +524,7 @@ func EndpointToURL(ep *model.Endpoint) string {
 		if ep.ID != "" {
 			auth = percentEncode(ep.ID) + "@"
 		}
-		return "hy2://" + auth + host + ":" + strconv.Itoa(ep.Port) + query + tagSuffix(ep.Tag)
+		return "hy2://" + auth + hostPort + query + tagSuffix(ep.Tag)
 	}
 	return ""
 }
@@ -609,22 +621,42 @@ func asString(v any) string {
 	return ""
 }
 
+// asInt converts a JSON/YAML value to a valid TCP/UDP port. All current call
+// sites are ports, so values outside 1..65535 are rejected with 0.
 func asInt(v any) int {
+	var n int64
 	switch x := v.(type) {
 	case int:
-		return x
+		n = int64(x)
 	case int64:
-		return int(x)
+		n = x
 	case float64:
-		return int(x)
+		if math.IsNaN(x) || math.IsInf(x, 0) || x != math.Trunc(x) {
+			return 0
+		}
+		if x < 1 || x > 65535 {
+			return 0
+		}
+		n = int64(x)
 	case json.Number:
-		n, _ := x.Int64()
-		return int(n)
+		parsed, err := x.Int64()
+		if err != nil {
+			return 0
+		}
+		n = parsed
 	case string:
-		n, _ := strconv.Atoi(strings.TrimSpace(x))
-		return n
+		parsed, err := strconv.ParseInt(strings.TrimSpace(x), 10, 64)
+		if err != nil {
+			return 0
+		}
+		n = parsed
+	default:
+		return 0
 	}
-	return 0
+	if n < 1 || n > 65535 {
+		return 0
+	}
+	return int(n)
 }
 
 func asBool(v any) bool {

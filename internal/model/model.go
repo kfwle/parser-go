@@ -33,6 +33,7 @@ type Endpoint struct {
 	Key          string
 	PublicKey    string
 	ShortID      string
+	Encryption   string // VLESS encryption (default "none")
 
 	AllowInsecure bool
 

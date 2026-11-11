@@ -100,7 +100,7 @@ func Xray(ep *model.Endpoint, tag string) map[string]any {
 		if stream == nil {
 			return nil
 		}
-		user := map[string]any{"id": ep.ID, "encryption": "none"}
+		user := map[string]any{"id": ep.ID, "encryption": DefString(ep.Encryption, "none")}
 		if ep.Flow != "" {
 			user["flow"] = ep.Flow
 		}
@@ -124,36 +124,9 @@ func Xray(ep *model.Endpoint, tag string) map[string]any {
 			"streamSettings": stream,
 		}
 	case model.Hysteria2:
-		sni := ep.SNI
-		if sni == "" {
-			sni = ep.Host
-		}
-		tls := map[string]any{"sni": sni, "insecure": ep.Insecure}
-		if alpn := SplitALPN(ep.ALPN); len(alpn) > 0 && ep.ALPN != "h3" {
-			tls["alpn"] = alpn
-		}
-		settings := map[string]any{
-			"server": ep.Host + ":" + strconv.Itoa(ep.Port),
-			"auth":   ep.ID,
-			"tls":    tls,
-			"socks5": map[string]any{"listen": "127.0.0.1:1080"},
-		}
-		if ep.ObfsPassword != "" {
-			settings["transport"] = map[string]any{"udp": map[string]any{"obfs": map[string]any{
-				"type": "salamander", "password": ep.ObfsPassword,
-			}}}
-		}
-		if ep.UpMbps != "" || ep.DownMbps != "" {
-			bandwidth := map[string]any{}
-			if ep.UpMbps != "" {
-				bandwidth["up"] = ep.UpMbps + " mbps"
-			}
-			if ep.DownMbps != "" {
-				bandwidth["down"] = ep.DownMbps + " mbps"
-			}
-			settings["bandwidth"] = bandwidth
-		}
-		return map[string]any{"tag": tag, "protocol": "hysteria2", "settings": settings, "type": "hysteria2"}
+		// Xray has no Hysteria2 outbound. Hysteria2 is emitted to Clash and
+		// sing-box, and validated by its own client.
+		return nil
 	}
 	return nil
 }
@@ -179,7 +152,7 @@ func Singbox(ep *model.Endpoint, tag string) map[string]any {
 	case model.Trojan:
 		base["type"] = "trojan"
 		base["password"] = ep.ID
-		base["tls"] = map[string]any{"enabled": true}
+		base["tls"] = map[string]any{"enabled": ep.Security != "none"}
 	case model.Hysteria2:
 		base["type"] = "hysteria2"
 		base["password"] = ep.ID
@@ -189,7 +162,7 @@ func Singbox(ep *model.Endpoint, tag string) map[string]any {
 		return nil
 	}
 	tls := base["tls"].(map[string]any)
-	if ep.Security == "tls" || ep.Security == "reality" || ep.Protocol != model.VLESS {
+	if ep.Security == "tls" || ep.Security == "reality" {
 		tls["enabled"] = true
 	}
 	if ep.SNI != "" {

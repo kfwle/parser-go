@@ -46,6 +46,8 @@ func Migrate(fromDir string, paths *config.Paths, force bool) (MigrateReport, er
 		{filepath.Join(fromAbs, "sources", "banner.txt"), paths.BannerFile},
 		{filepath.Join(fromAbs, "configs", "generic", "whitelist.txt"), paths.WhitelistFile},
 		{filepath.Join(fromAbs, "configs", "generic", "blacklist.txt"), paths.BlacklistFile},
+		{filepath.Join(fromAbs, "temp", "garbage_conf.txt"), paths.GarbageFile},
+		{filepath.Join(fromAbs, "temp", "GeoLite2-Country.mmdb"), paths.MaxmindDB},
 	}
 	for _, item := range files {
 		if _, err := os.Stat(item.src); err != nil {
@@ -66,19 +68,23 @@ func Migrate(fromDir string, paths *config.Paths, force bool) (MigrateReport, er
 	// config.json: replace only when the destination still has default values.
 	srcConfig := filepath.Join(fromAbs, "config.json")
 	if _, err := os.Stat(srcConfig); err == nil {
-		isDefault := !fileExists(paths.ConfigFile)
-		if !isDefault {
-			if dstCfg, loadErr := config.Load(paths.ConfigFile); loadErr == nil && dstCfg == config.Default() {
-				isDefault = true
-			}
-		}
-		if force || isDefault {
-			if err := copyFileTo(srcConfig, paths.ConfigFile); err != nil {
-				return report, fmt.Errorf("копирование config.json: %w", err)
-			}
-			report.Copied = append(report.Copied, "config.json")
+		if _, err := config.Load(srcConfig); err != nil {
+			report.Skipped = append(report.Skipped, "config.json (невалидный, пропущен)")
 		} else {
-			report.Skipped = append(report.Skipped, "config.json (уже настроен)")
+			isDefault := !fileExists(paths.ConfigFile)
+			if !isDefault {
+				if dstCfg, loadErr := config.Load(paths.ConfigFile); loadErr == nil && dstCfg == config.Default() {
+					isDefault = true
+				}
+			}
+			if force || isDefault {
+				if err := copyFileTo(srcConfig, paths.ConfigFile); err != nil {
+					return report, fmt.Errorf("копирование config.json: %w", err)
+				}
+				report.Copied = append(report.Copied, "config.json")
+			} else {
+				report.Skipped = append(report.Skipped, "config.json (уже настроен)")
+			}
 		}
 	}
 

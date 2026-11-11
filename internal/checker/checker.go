@@ -51,7 +51,7 @@ func New(paths *config.Paths, timeoutSeconds int) *Checker {
 		TestURLs: []string{
 			"https://www.gstatic.com/generate_204",
 			"https://cp.cloudflare.com/generate_204",
-			"http://connectivitycheck.gstatic.com/generate_204",
+			"https://connectivitycheck.gstatic.com/generate_204",
 			"https://www.google.com/generate_204",
 		},
 	}
@@ -122,17 +122,27 @@ func (c *Checker) checkHysteria2(ctx context.Context, raw, tempDir string) (bool
 }
 
 // Ping measures latency through a local SOCKS5 proxy. The whole call is capped
-// by the per-config timeout, no matter how many fallback URLs are configured.
+// by the per-config timeout, but every fallback URL gets its own slice so a
+// blackholed first target cannot starve the rest.
 func (c *Checker) Ping(ctx context.Context, socksAddr string) (int, error) {
 	deadlineCtx, cancel := context.WithTimeout(ctx, c.Timeout)
 	defer cancel()
+	if len(c.TestURLs) == 0 {
+		return 0, errors.New("no test URL")
+	}
+	perAttempt := c.Timeout / time.Duration(len(c.TestURLs))
+	if perAttempt < 2*time.Second {
+		perAttempt = 2 * time.Second
+	}
 	var lastErr error
 	for _, testURL := range c.TestURLs {
 		if deadlineCtx.Err() != nil {
 			break
 		}
 		start := time.Now()
-		body, err := HTTPGetViaSocks(deadlineCtx, socksAddr, testURL, c.Timeout)
+		attemptCtx, attemptCancel := context.WithTimeout(deadlineCtx, perAttempt)
+		body, err := HTTPGetViaSocks(attemptCtx, socksAddr, testURL, perAttempt)
+		attemptCancel()
 		if err == nil {
 			_ = body
 			return int(time.Since(start).Milliseconds()), nil
@@ -182,12 +192,24 @@ func (c *Checker) WithXraySocks(ctx context.Context, raw, workDir string, fn fun
 			}},
 		},
 	}
-	cfgPath := filepath.Join(workDir, fmt.Sprintf("config_%d.json", port))
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	cfgFile, err := os.CreateTemp(workDir, fmt.Sprintf("config_%d_*.json", port))
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(cfgPath, data, 0o644); err != nil {
+	cfgPath := cfgFile.Name()
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		cfgFile.Close()
+		os.Remove(cfgPath)
+		return err
+	}
+	if _, err := cfgFile.Write(data); err != nil {
+		cfgFile.Close()
+		os.Remove(cfgPath)
+		return err
+	}
+	if err := cfgFile.Close(); err != nil {
+		os.Remove(cfgPath)
 		return err
 	}
 	defer os.Remove(cfgPath)
@@ -299,8 +321,13 @@ func (h *coreHandle) Exited() bool {
 
 func (h *coreHandle) Stop() {
 	h.stopOnce.Do(func() {
-		if !h.Exited() {
+		for i := 0; i < 3 && !h.Exited(); i++ {
 			killProcessTree(h.cmd)
+			select {
+			case <-h.done:
+				return
+			case <-time.After(300 * time.Millisecond):
+			}
 		}
 		select {
 		case <-h.done:
@@ -310,6 +337,13 @@ func (h *coreHandle) Stop() {
 }
 
 func (h *coreHandle) LastOutput(max int) string {
+	// os/exec writes into the buffer from its own goroutine. Reading it while
+	// the process is still alive would race; only read after Wait returned.
+	select {
+	case <-h.done:
+	default:
+		return ""
+	}
 	s := strings.TrimSpace(h.output.String())
 	if len(s) > max {
 		s = s[len(s)-max:]
@@ -375,7 +409,7 @@ func hysteria2Config(ep *model.Endpoint, socksPort int) ([]byte, error) {
 		alpn = []string{"h3"}
 	}
 	cfg := map[string]any{
-		"server": fmt.Sprintf("%s:%d", ep.Host, ep.Port),
+		"server": net.JoinHostPort(ep.Host, strconv.Itoa(ep.Port)),
 		"auth":   auth,
 		"tls": map[string]any{
 			"sni":      sni,

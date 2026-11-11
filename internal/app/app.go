@@ -64,6 +64,11 @@ func (a *App) RunOnce(ctx context.Context) error {
 		return nil
 	}
 
+	a.importMyConfigs()
+	if ctx.Err() != nil {
+		return nil
+	}
+
 	if a.Cfg.LoadSources {
 		a.loadHTTPSources(ctx)
 	} else {
@@ -179,7 +184,7 @@ func (a *App) RunOnce(ctx context.Context) error {
 	return nil
 }
 
-// RunLoop repeats RunOnce until the context is cancelled or SingleCycle is set.
+// RunLoop repeats RunOnce until the context is cancelled.
 func (a *App) RunLoop(ctx context.Context) error {
 	for {
 		err := a.RunOnce(ctx)
@@ -189,7 +194,7 @@ func (a *App) RunLoop(ctx context.Context) error {
 			}
 			logx.Printf("Ошибка цикла: %v\n", err)
 		}
-		if ctx.Err() != nil || a.Cfg.SingleCycle {
+		if ctx.Err() != nil {
 			return nil
 		}
 		rest := a.Cfg.RestTime
@@ -289,26 +294,16 @@ func fileExists(path string) bool {
 func appendUnique(path string, urls []string, isConfig bool) (int, error) {
 	existing := make(map[string]struct{})
 	if fileExists(path) {
-		f, err := os.Open(path)
+		lines, err := dedup.ReadLines(path)
 		if err != nil {
 			return 0, err
 		}
-		sc := bufio.NewScanner(f)
-		sc.Buffer(make([]byte, 64*1024), 8*1024*1024)
-		for sc.Scan() {
-			line := strings.TrimSpace(sc.Text())
-			if line == "" {
-				continue
-			}
+		for _, line := range lines {
 			if isConfig {
 				existing[extract.NormalizeConfig(line)] = struct{}{}
 			} else {
 				existing[extract.NormalizeSource(line)] = struct{}{}
 			}
-		}
-		f.Close()
-		if err := sc.Err(); err != nil {
-			return 0, err
 		}
 	}
 	toAdd := make([]string, 0, len(urls))

@@ -14,10 +14,12 @@ import (
 
 	"github.com/kfwle/parser-go/internal/config"
 	"github.com/kfwle/parser-go/internal/dedup"
+	"github.com/kfwle/parser-go/internal/fetch"
 	"github.com/kfwle/parser-go/internal/logx"
 )
 
 func TestRunOnceIntegration(t *testing.T) {
+	fetch.AllowPrivate = true // httptest listens on 127.0.0.1
 	logx.SetVerbose(false)
 	plain := "vless://11111111-2222-3333-4444-555555555555@1.2.3.4:443?security=reality&pbk=PBK&sid=abcd&sni=a.example#First\n" +
 		"vless://22222222-2222-3333-4444-555555555555@1.2.4.5:443?security=tls&sni=b.example#Second\n"
@@ -120,5 +122,64 @@ func TestRunOnceIntegration(t *testing.T) {
 	}
 	if len(xray.Outbounds) != 3 {
 		t.Fatalf("xray outbounds=%d", len(xray.Outbounds))
+	}
+}
+
+func TestCheckAbortsWhenCoreMissing(t *testing.T) {
+	paths := config.NewPaths(t.TempDir())
+	if err := paths.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	input := paths.WLFilteredFile
+	if err := os.WriteFile(input, []byte("vless://11111111-2222-3333-4444-555555555555@1.2.3.4:443?security=tls#a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := paths.WhitelistFile
+	if err := os.WriteFile(output, []byte("PREVIOUS-GOOD-WHITELIST\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.CheckViaXray = true
+	cfg.SaveGarbage = true
+	New(cfg, paths).checkAndRename(context.Background(), input, output)
+	data, err := os.ReadFile(output)
+	if err != nil || string(data) != "PREVIOUS-GOOD-WHITELIST\n" {
+		t.Fatalf("output was modified without a core: %q err=%v", data, err)
+	}
+	if fileExists(paths.GarbageFile) {
+		t.Fatal("garbage must not be written without a core")
+	}
+}
+
+func TestMyConfigsImportedWithoutSources(t *testing.T) {
+	dir := t.TempDir()
+	paths := config.NewPaths(dir)
+	if err := paths.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.MyConfigsFile, []byte(
+		"vless://11111111-2222-3333-4444-555555555555@1.2.3.4:443?security=tls#one\n"+
+			"vless://22222222-2222-3333-4444-555555555555@1.2.3.5:443?security=tls#two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.ImportWhitelist = false
+	cfg.ImportBlacklist = false
+	cfg.UseTelegram = false
+	cfg.FilterIP = false
+	cfg.FilterSNI = false
+	cfg.FilterOthers = false
+	cfg.CheckWhitelist = false
+	cfg.CheckBlacklist = false
+	cfg.SaveClash = false
+	cfg.SaveXray = false
+	cfg.SaveSingbox = false
+	cfg.SaveGarbage = false
+	if err := New(cfg, paths).RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	lines, err := dedup.ReadLines(paths.ConfigsFile)
+	if err != nil || len(lines) != 2 {
+		t.Fatalf("my_configs not imported: %v err=%v", lines, err)
 	}
 }

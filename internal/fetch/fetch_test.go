@@ -10,6 +10,7 @@ import (
 )
 
 func TestFetchSourceAndHappFallback(t *testing.T) {
+	AllowPrivate = true // httptest listens on 127.0.0.1
 	body := "vless://11111111-2222-3333-4444-555555555555@1.2.3.4:443?security=tls#source"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

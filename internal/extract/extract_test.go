@@ -4,6 +4,8 @@ import (
 	"encoding/base64"
 	"strings"
 	"testing"
+
+	"github.com/kfwle/parser-go/internal/model"
 )
 
 const testUUID = "11111111-2222-3333-4444-555555555555"
@@ -195,6 +197,86 @@ func TestHostPort(t *testing.T) {
 		host, port, ok := HostPort(tc.raw)
 		if !ok || host != tc.host || port != tc.port {
 			t.Fatalf("%s -> %s:%d ok=%v", tc.raw, host, port, ok)
+		}
+	}
+}
+
+func TestAtInsideQueryDoesNotMoveHost(t *testing.T) {
+	raw := "vless://" + testUUID + "@good.example:443?type=ws&path=%2Ffoo%40evil.example:8443&sni=x.example"
+	ep, ok := ParseVLESS(raw)
+	if !ok || ep.Host != "good.example" || ep.Port != 443 {
+		t.Fatalf("bad endpoint: %+v", ep)
+	}
+	if ep.Path != "/foo@evil.example:8443" {
+		t.Fatalf("path=%q", ep.Path)
+	}
+	hy2, ok := ParseHysteria2("hy2://pass@1.2.3.4:443?obfs-password=p@ss")
+	if !ok || hy2.Host != "1.2.3.4" || hy2.ObfsPassword != "p@ss" {
+		t.Fatalf("hy2=%+v", hy2)
+	}
+}
+
+func TestCleanURLKeepsEncodedDelimiters(t *testing.T) {
+	raw := "vless://" + testUUID + "@h.example:443?path=%2Fa%23b&sni=a.com#tag"
+	ep, ok := ParseVLESS(raw)
+	if !ok || ep.Path != "/a#b" || ep.SNI != "a.com" || ep.Tag != "tag" {
+		t.Fatalf("bad endpoint: %+v", ep)
+	}
+}
+
+func TestPortRangeRejected(t *testing.T) {
+	jsonDocs := []string{
+		`{"outbounds":[{"protocol":"vless","settings":{"vnext":[{"address":"h","port":70000,"users":[{"id":"` + testUUID + `"}]}]}}]}`,
+		`{"outbounds":[{"protocol":"vless","settings":{"vnext":[{"address":"h","port":-1,"users":[{"id":"` + testUUID + `"}]}]}}]}`,
+		`{"outbounds":[{"protocol":"vless","settings":{"vnext":[{"address":"h","port":1e19,"users":[{"id":"` + testUUID + `"}]}]}}]}`,
+	}
+	for _, doc := range jsonDocs {
+		if urls := JSONToURLs(doc); len(urls) != 0 {
+			t.Fatalf("invalid port accepted: %v", urls)
+		}
+	}
+	yamlDoc := "proxies:\n  - name: x\n    type: vless\n    server: h\n    port: 70000\n    uuid: " + testUUID + "\n"
+	if urls := YAMLToURLs(yamlDoc); len(urls) != 0 {
+		t.Fatalf("invalid YAML port accepted: %v", urls)
+	}
+}
+
+func TestTrojanRealityRoundTrip(t *testing.T) {
+	raw := "trojan://pass@h.example:443?security=reality&pbk=PUBKEY&sid=abcd&sni=x.example"
+	ep, ok := ParseTrojan(raw)
+	if !ok || ep.PublicKey != "PUBKEY" || ep.ShortID != "abcd" {
+		t.Fatalf("reality keys lost: %+v", ep)
+	}
+	out := EndpointToURL(ep)
+	if !strings.Contains(out, "pbk=PUBKEY") || !strings.Contains(out, "sid=abcd") {
+		t.Fatalf("serialised without reality keys: %s", out)
+	}
+}
+
+func TestSNIIgnoresFragment(t *testing.T) {
+	if got := ExtractSNI("trojan://p@1.2.3.4:443#&sni=allowed.example"); got != "" {
+		t.Fatalf("SNI from fragment accepted: %q", got)
+	}
+}
+
+func TestHostInjectionRejected(t *testing.T) {
+	base := model.Endpoint{Protocol: model.VLESS, ID: testUUID, Host: "x@evil.example", Port: 443}
+	if got := EndpointToURL(&base); got != "" {
+		t.Fatalf("host injection accepted: %s", got)
+	}
+	base.Host = "x evil.example"
+	if got := EndpointToURL(&base); got != "" {
+		t.Fatalf("space host accepted: %s", got)
+	}
+}
+
+func TestNormalizeConfigIdempotent(t *testing.T) {
+	inputs := []string{"0 #", "vless://x@h:1?b=2&a=1#tag", "vless://x@h:1?b=2&a=1", "  vless://x@h:1#t  "}
+	for _, in := range inputs {
+		once := NormalizeConfig(in)
+		twice := NormalizeConfig(once)
+		if once != twice {
+			t.Fatalf("not idempotent: %q -> %q -> %q", in, once, twice)
 		}
 	}
 }

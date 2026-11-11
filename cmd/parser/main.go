@@ -17,7 +17,7 @@ import (
 	"github.com/kfwle/parser-go/internal/tools"
 )
 
-const version = "1.0.2"
+const version = "1.0.3"
 
 func main() {
 	os.Exit(run())
@@ -43,11 +43,15 @@ func run() int {
 	}
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
-		logx.Printf("[!] Ошибка конфигурации: %v\n", err)
-		return 1
+		broken := cfgFile + ".broken"
+		if renameErr := os.Rename(cfgFile, broken); renameErr == nil {
+			logx.Printf("[!] Ошибка конфигурации: %v\n", err)
+			logx.Printf("    Битый файл сохранён как %s, использую значения по умолчанию.\n", broken)
+		} else {
+			logx.Printf("[!] Ошибка конфигурации: %v — использую значения по умолчанию.\n", err)
+		}
 	}
 	logx.SetVerbose(cfg.Verbose)
-	logx.Printf("Рабочая папка: %s\n", paths.Base)
 	if !fileExists(cfgFile) {
 		if err := cfg.Save(cfgFile); err != nil {
 			logx.Printf("[!] Не удалось создать %s: %v\n", cfgFile, err)
@@ -68,6 +72,10 @@ func run() int {
 		case <-sigCh:
 			logx.Println("\n[!] Получен сигнал остановки. Завершаем после текущей операции...")
 			cancel()
+			signal.Stop(sigCh)
+			// A second Ctrl+C now terminates immediately instead of being
+			// buffered forever.
+			signal.Reset(os.Interrupt, syscall.SIGTERM)
 		case <-ctx.Done():
 		}
 	}()
@@ -77,9 +85,14 @@ func run() int {
 		if stdinIsTerminal() {
 			command = "menu"
 		} else {
-			command = "once"
+			usage()
+			return 2
 		}
 	}
+	if command != "version" {
+		showBanner(paths)
+	}
+	logx.Printf("Рабочая папка: %s\n", paths.Base)
 
 	switch command {
 	case "menu", "run":
@@ -102,10 +115,24 @@ func run() int {
 			return 1
 		}
 		ensureCores(ctx, paths)
-		cfg.SingleCycle = false
-		if err := app.New(cfg, paths).RunLoop(ctx); err != nil {
-			logx.Printf("[!] %v\n", err)
-			return 1
+		if cfg.Cycles <= 0 {
+			if err := app.New(cfg, paths).RunLoop(ctx); err != nil {
+				logx.Printf("[!] %v\n", err)
+				return 1
+			}
+			return 0
+		}
+		for i := 0; i < cfg.Cycles; i++ {
+			if ctx.Err() != nil {
+				break
+			}
+			logx.Printf("Запуск цикла %d/%d...\n", i+1, cfg.Cycles)
+			if err := app.New(cfg, paths).RunOnce(ctx); err != nil {
+				logx.Printf("[!] %v\n", err)
+			}
+			if i < cfg.Cycles-1 {
+				waitRest(ctx, cfg.RestTime)
+			}
 		}
 		return 0
 	case "migrate":

@@ -21,12 +21,13 @@ func ParseVLESS(raw string) (*model.Endpoint, bool) {
 	}
 	main, tag := splitFragment(s)
 	rest := main[len("vless://"):]
-	at := strings.LastIndexByte(rest, '@')
+	authority, query := splitQuery(rest)
+	at := strings.LastIndexByte(authority, '@')
 	if at < 0 {
 		return nil, false
 	}
-	userinfo := rest[:at]
-	hostport, query := splitQuery(rest[at+1:])
+	userinfo := authority[:at]
+	hostport := authority[at+1:]
 	host, port, ok := parseHostPortStrict(hostport)
 	if !ok {
 		return nil, false
@@ -75,6 +76,7 @@ func ParseVLESS(raw string) (*model.Endpoint, bool) {
 		Key:           getDefault(q, "key", ""),
 		PublicKey:     pbk,
 		ShortID:       getDefault(q, "sid", ""),
+		Encryption:    getDefault(q, "encryption", "none"),
 		AllowInsecure: parseBool(getDefault(q, "allowInsecure", "true")),
 	}, true
 }
@@ -87,12 +89,13 @@ func ParseTrojan(raw string) (*model.Endpoint, bool) {
 	}
 	main, tag := splitFragment(s)
 	rest := main[len("trojan://"):]
-	at := strings.LastIndexByte(rest, '@')
+	authority, query := splitQuery(rest)
+	at := strings.LastIndexByte(authority, '@')
 	if at < 0 {
 		return nil, false
 	}
-	userinfo := rest[:at]
-	hostport, query := splitQuery(rest[at+1:])
+	userinfo := authority[:at]
+	hostport := authority[at+1:]
 	host, port, ok := parseHostPortStrict(hostport)
 	if !ok {
 		return nil, false
@@ -134,6 +137,8 @@ func ParseTrojan(raw string) (*model.Endpoint, bool) {
 		HeaderType:    getDefault(q, "headerType", ""),
 		QUICSecurity:  getDefault(q, "quicSecurity", ""),
 		Key:           getDefault(q, "key", ""),
+		PublicKey:     getDefault(q, "pbk", ""),
+		ShortID:       getDefault(q, "sid", ""),
 		AllowInsecure: parseBool(getDefault(q, "allowInsecure", "true")),
 	}, true
 }
@@ -152,17 +157,18 @@ func ParseHysteria2(raw string) (*model.Endpoint, bool) {
 		return nil, false
 	}
 	main, tag := splitFragment(rest)
+	authority, query := splitQuery(main)
 	auth := ""
-	if at := strings.LastIndexByte(main, '@'); at >= 0 {
-		authRaw := main[:at]
-		main = main[at+1:]
+	if at := strings.LastIndexByte(authority, '@'); at >= 0 {
+		authRaw := authority[:at]
+		authority = authority[at+1:]
 		if un, err := url.PathUnescape(authRaw); err == nil {
 			auth = un
 		} else {
 			auth = authRaw
 		}
 	}
-	hostport, query := splitQuery(main)
+	hostport := authority
 	host, port, err := splitHostPort(hostport)
 	if err != nil {
 		host = strings.Trim(hostport, "[]")
@@ -172,7 +178,7 @@ func ParseHysteria2(raw string) (*model.Endpoint, bool) {
 	if err != nil || portNum < 1 || portNum > 65535 {
 		portNum = 443
 	}
-	if host == "" {
+	if host == "" || !IsValidHost(host) {
 		return nil, false
 	}
 	q := parseQueryValues(query)
@@ -222,7 +228,19 @@ func parseQueryValues(query string) map[string]string {
 	if query == "" {
 		return out
 	}
-	values, _ := url.ParseQuery(query)
+	values, err := url.ParseQuery(query)
+	if err != nil {
+		// Go rejects ';' as a separator; older subscriptions still use it.
+		values = url.Values{}
+		for _, part := range strings.FieldsFunc(query, func(r rune) bool {
+			return r == '&' || r == ';'
+		}) {
+			k, v, _ := strings.Cut(part, "=")
+			key, _ := url.QueryUnescape(k)
+			val, _ := url.QueryUnescape(v)
+			values.Add(key, val)
+		}
+	}
 	for k, v := range values {
 		if len(v) > 0 {
 			out[k] = strings.TrimSpace(v[0])
@@ -252,7 +270,7 @@ func parseHostPortStrict(hostport string) (string, int, bool) {
 		return "", 0, false
 	}
 	port, err := strconv.Atoi(portStr)
-	if err != nil || port < 1 || port > 65535 || host == "" {
+	if err != nil || port < 1 || port > 65535 || !IsValidHost(host) {
 		return "", 0, false
 	}
 	return host, port, true

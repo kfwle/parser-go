@@ -12,3 +12,8 @@ var HappCrypt1to4 []byte
 //
 //go:embed keys/happcrypt5.json
 var HappCrypt5 []byte
+
+// Banner is the built-in fallback logo shown when sources/banner.txt is absent.
+//
+//go:embed banner.txt
+var Banner string

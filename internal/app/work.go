@@ -1,12 +1,12 @@
 package app
 
 import (
-	"bufio"
 	"errors"
 	"os"
 	"strings"
 
 	"github.com/kfwle/parser-go/internal/config"
+	"github.com/kfwle/parser-go/internal/dedup"
 	"github.com/kfwle/parser-go/internal/logx"
 )
 
@@ -16,10 +16,11 @@ var ErrNoWork = errors.New("нет источников для парсинга"
 
 // HasWork reports whether at least one input contains real data.
 func (a *App) HasWork() bool {
-	if a.Cfg.LoadSources {
-		if countMeaningful(a.Paths.SourcesFile) > 0 || countMeaningful(a.Paths.MyConfigsFile) > 0 {
-			return true
-		}
+	if a.Cfg.LoadSources && countMeaningful(a.Paths.SourcesFile) > 0 {
+		return true
+	}
+	if countMeaningful(a.Paths.MyConfigsFile) > 0 {
+		return true
 	}
 	if a.Cfg.UseTelegram && countMeaningful(a.Paths.TGFile) > 0 {
 		return true
@@ -38,16 +39,12 @@ func (a *App) HasWork() bool {
 
 // countMeaningful counts lines that are not empty and not comments.
 func countMeaningful(path string) int {
-	f, err := os.Open(path)
+	lines, err := dedup.ReadLines(path)
 	if err != nil {
 		return 0
 	}
-	defer f.Close()
 	count := 0
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
+	for _, line := range lines {
 		if line != "" && !strings.HasPrefix(line, "#") {
 			count++
 		}

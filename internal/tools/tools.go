@@ -59,6 +59,11 @@ func FilterSources(ctx context.Context, paths *config.Paths) error {
 		}
 	})
 
+	if ctx.Err() != nil {
+		logx.Println("Фильтрация источников прервана, sources.txt не изменён.")
+		return nil
+	}
+
 	backup := filepath.Join(paths.BackupsDir, "sources_backup_"+time.Now().Format("20060102_1504")+".txt")
 	if err := os.MkdirAll(paths.BackupsDir, 0o755); err != nil {
 		return err
@@ -73,6 +78,10 @@ func FilterSources(ctx context.Context, paths *config.Paths) error {
 		if ok {
 			kept = append(kept, urls[i])
 		}
+	}
+	if len(kept) == 0 {
+		logx.Println("[!] Ни один источник не ответил — sources.txt не изменён (возможно, сеть недоступна).")
+		return nil
 	}
 	if err := dedup.WriteLines(paths.SourcesFile, kept); err != nil {
 		return err
@@ -190,7 +199,7 @@ func UpdateCores(ctx context.Context, paths *config.Paths) error {
 // DownloadWhitelist fetches an IP or domain whitelist into dest.
 func DownloadWhitelist(ctx context.Context, rawURL, dest, label string) error {
 	logx.Printf("Скачивание %s whitelist...\n", label)
-	content, err := fetch.Get(ctx, rawURL, 60*time.Second, nil)
+	content, err := fetch.GetSecure(ctx, rawURL, 60*time.Second, nil)
 	if err != nil {
 		return err
 	}

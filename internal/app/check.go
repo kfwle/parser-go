@@ -71,6 +71,10 @@ func (a *App) checkAndRename(ctx context.Context, input, output string) {
 		logx.Println("Нет новых конфигов для проверки (все в мусоре).")
 		return
 	}
+	if !a.ensureCheckCores(urls) {
+		logx.Println("Проверка не запущена: нужные ядра недоступны. Файлы не изменены.")
+		return
+	}
 	logx.Printf("Таймаут: %d сек, потоков: %d\n", a.Cfg.CheckTimeout, a.Cfg.CheckThreads)
 	logx.Printf("Проверяем %d конфигов\n", len(urls))
 
@@ -112,16 +116,21 @@ func (a *App) checkAndRename(ctx context.Context, input, output string) {
 		logx.Println(strings.Join(parts, " | "))
 	}
 
-	if a.Cfg.SaveGarbage {
-		a.saveGarbage(checked, alive)
+	if ctx.Err() != nil {
+		logx.Println("Проверка прервана, файлы не изменены.")
+		return
+	}
+	// A run where every single config failed is almost always caused by a
+	// missing core, a network outage or a broken proxy setup. Do not persist
+	// those as garbage and do not wipe the previous results.
+	if len(alive) == 0 {
+		logx.Println("[!] Ни один конфиг не прошёл проверку. Возможно, недоступны ядра или сеть.")
+		logx.Println("    Файлы не изменены, в garbage ничего не добавлено.")
+		return
 	}
 
-	if len(alive) == 0 {
-		if err := dedup.WriteLines(output, nil); err != nil {
-			logx.Printf("Не удалось записать %s: %v\n", output, err)
-		}
-		logx.Println("Нет рабочих конфигов, выходной файл пуст.")
-		return
+	if a.Cfg.SaveGarbage {
+		a.saveGarbage(checked, alive)
 	}
 
 	if !a.Cfg.DetermineCountry {
@@ -139,6 +148,7 @@ func (a *App) checkAndRename(ctx context.Context, input, output string) {
 
 	logx.Printf("\nОпределение стран для %d рабочих конфигов...\n", len(alive))
 	detector := country.New(chk, a.Paths, a.Cfg.UseMaxmind)
+	defer detector.Close()
 	updated := make([]string, len(alive))
 	indices := make([]int, len(alive))
 	for i := range indices {
@@ -152,6 +162,10 @@ func (a *App) checkAndRename(ctx context.Context, input, output string) {
 			updated[i] = country.UpdateURLTag(alive[i].url, nil, a.Cfg.EncodeNames)
 		}
 	})
+	if ctx.Err() != nil {
+		logx.Println("Определение стран прервано, файлы не изменены.")
+		return
+	}
 
 	safe := make([]string, 0, len(updated))
 	unsafe := make([]string, 0, len(updated))
@@ -174,14 +188,46 @@ func (a *App) checkAndRename(ctx context.Context, input, output string) {
 	logx.Printf("  Безопасные: %d, Небезопасные (⚠️): %d\n", len(safe), len(unsafe))
 }
 
+// ensureCheckCores verifies that every core required for this list exists.
+// Running checks without a core would mark every config as dead and poison the
+// garbage pool, so the stage is skipped entirely instead.
+func (a *App) ensureCheckCores(urls []string) bool {
+	needXray := false
+	needHy2 := false
+	for _, raw := range urls {
+		ep, ok := extract.ParseConfig(raw)
+		if !ok {
+			continue
+		}
+		if ep.IsHysteria2() {
+			needHy2 = true
+		} else if a.Cfg.CheckViaXray {
+			needXray = true
+		}
+	}
+	ok := true
+	if needXray && !fileExists(a.Paths.XrayPath) {
+		logx.Printf("[!] Xray не найден (%s), а в списке есть VLESS/Trojan.\n", a.Paths.XrayPath)
+		ok = false
+	}
+	hy2Path := checker.FindHysteria2(a.Paths)
+	if needHy2 && !fileExists(hy2Path) {
+		logx.Printf("[!] Hysteria2 не найден (%s), а в списке есть HY2.\n", hy2Path)
+		ok = false
+	}
+	return ok
+}
+
 func (a *App) saveGarbage(checked map[string]struct{}, alive []aliveConfig) {
 	aliveSet := make(map[string]struct{}, len(alive))
 	for _, item := range alive {
 		aliveSet[item.url] = struct{}{}
 	}
 	existing := make(map[string]struct{})
+	var existingLines []string
 	if fileExists(a.Paths.GarbageFile) {
 		if lines, err := dedup.ReadLines(a.Paths.GarbageFile); err == nil {
+			existingLines = lines
 			for _, cfg := range lines {
 				existing[extract.NormalizeConfig(cfg)] = struct{}{}
 			}
@@ -202,26 +248,12 @@ func (a *App) saveGarbage(checked map[string]struct{}, alive []aliveConfig) {
 	if len(toAdd) == 0 {
 		return
 	}
-	if err := appendRaw(a.Paths.GarbageFile, toAdd); err != nil {
+	existingLines = append(existingLines, toAdd...)
+	if err := dedup.WriteLines(a.Paths.GarbageFile, existingLines); err != nil {
 		logx.Printf("Не удалось записать garbage_conf.txt: %v\n", err)
 		return
 	}
 	logx.Printf("Добавлено в garbage_conf.txt: %d нерабочих конфигов\n", len(toAdd))
-}
-
-func appendRaw(path string, lines []string) error {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	var b strings.Builder
-	for _, line := range lines {
-		b.WriteString(line)
-		b.WriteByte('\n')
-	}
-	_, err = f.WriteString(b.String())
-	return err
 }
 
 func itoa(n int) string {

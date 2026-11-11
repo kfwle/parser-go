@@ -29,6 +29,34 @@ type sourceStats struct {
 	newConfigs  []string
 }
 
+// importMyConfigs adds user-owned configs independently of HTTP sources, so
+// my_configs.txt works even when sources.txt is empty or load_sources=false.
+func (a *App) importMyConfigs() {
+	if !fileExists(a.Paths.MyConfigsFile) {
+		return
+	}
+	lines, err := dedup.ReadLines(a.Paths.MyConfigsFile)
+	if err != nil {
+		logx.Printf("Не удалось прочитать %s: %v\n", a.Paths.MyConfigsFile, err)
+		return
+	}
+	configs := make([]string, 0, len(lines))
+	for _, cfg := range lines {
+		if extract.IsValidConfig(cfg) {
+			configs = append(configs, extract.EnsureHashSuffix(cfg))
+		}
+	}
+	if len(configs) == 0 {
+		return
+	}
+	added, err := appendUnique(a.Paths.ConfigsFile, configs, true)
+	if err != nil {
+		logx.Printf("Не удалось записать свои конфиги: %v\n", err)
+		return
+	}
+	logx.Printf("  Мои конфиги: %d (новых: %d)\n", len(configs), added)
+}
+
 func (a *App) loadHTTPSources(ctx context.Context) {
 	logx.Println("\n" + strings.Repeat("=", 60))
 	logx.Println("Загрузка HTTP-источников (multithread)")
@@ -101,28 +129,6 @@ func (a *App) loadHTTPSources(ctx context.Context) {
 	}
 	logx.Verbosef("  Уже есть конфигов: %d\n", len(existing))
 
-	// my_configs.txt has priority: add it before sources so sources cannot
-	// shadow entries with the same key.
-	var myNew []string
-	if fileExists(a.Paths.MyConfigsFile) {
-		lines, err := dedup.ReadLines(a.Paths.MyConfigsFile)
-		if err == nil {
-			for _, cfg := range lines {
-				if !extract.IsValidConfig(cfg) {
-					continue
-				}
-				cfg = extract.EnsureHashSuffix(cfg)
-				norm := extract.NormalizeConfig(cfg)
-				if _, dup := existing[norm]; dup {
-					continue
-				}
-				existing[norm] = struct{}{}
-				myNew = append(myNew, cfg)
-			}
-			logx.Printf("  Мои конфиги: %d (новых: %d)\n", len(lines), len(myNew))
-		}
-	}
-
 	stats := &sourceStats{}
 	options := extract.Options{
 		VLESS:     a.Cfg.SaveVlessHTTP,
@@ -192,14 +198,6 @@ func (a *App) loadHTTPSources(ctx context.Context) {
 			logx.Printf("  Не удалось записать новые конфиги: %v\n", err)
 		} else {
 			logx.Printf("  Добавлено новых конфигов: %d\n", added)
-		}
-	}
-	if len(myNew) > 0 {
-		added, err := appendUnique(a.Paths.ConfigsFile, myNew, true)
-		if err != nil {
-			logx.Printf("  Не удалось записать свои конфиги: %v\n", err)
-		} else {
-			logx.Printf("  Добавлено своих конфигов: %d\n", added)
 		}
 	}
 

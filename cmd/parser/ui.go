@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kfwle/parser-go/assets"
 	"github.com/kfwle/parser-go/internal/app"
 	"github.com/kfwle/parser-go/internal/config"
 	"github.com/kfwle/parser-go/internal/logx"
@@ -23,17 +24,17 @@ func header(title string) {
 }
 
 func showBanner(paths *config.Paths) {
-	data, err := os.ReadFile(paths.BannerFile)
-	if err == nil && strings.TrimSpace(string(data)) != "" {
-		banner := strings.ReplaceAll(string(data), "{version}", version)
-		banner = strings.ReplaceAll(banner, "RKP_Parser5.0.1.py", "parser-go v"+version)
-		fmt.Print(banner)
-		if !strings.HasSuffix(banner, "\n") {
-			fmt.Println()
-		}
-		return
+	banner := assets.Banner
+	if data, err := os.ReadFile(paths.BannerFile); err == nil && strings.TrimSpace(string(data)) != "" {
+		banner = string(data)
 	}
-	fmt.Printf("   #RKP Parser Go v%s\n", version)
+	banner = strings.ReplaceAll(banner, "{version}", version)
+	banner = strings.ReplaceAll(banner, "RKP_Parser5.0.1.py", "parser-go v"+version)
+	banner = strings.ReplaceAll(banner, "RKP_Parser5.0.1", "parser-go v"+version)
+	fmt.Print(banner)
+	if !strings.HasSuffix(banner, "\n") {
+		fmt.Println()
+	}
 }
 
 func promptEnter() {
@@ -104,9 +105,7 @@ func mainMenu(ctx context.Context, cfg *config.Config, paths *config.Paths, cfgF
 			}
 			ensureCores(ctx, paths)
 			logx.Println("Одиночный тестовый цикл...")
-			single := *cfg
-			single.SingleCycle = true
-			if err := app.New(single, paths).RunOnce(ctx); err != nil {
+			if err := app.New(*cfg, paths).RunOnce(ctx); err != nil {
 				logx.Printf("[!] %v\n", err)
 			}
 			promptEnter()

@@ -155,7 +155,7 @@ func decryptCrypt5(payload string) (string, error) {
 		return "", fmt.Errorf("crypt5 segment length: %w", err)
 	}
 	packed := rest[digits:]
-	if len(packed) < 1+segmentLen {
+	if segmentLen < 0 || len(packed) < 1 || segmentLen > len(packed)-1 {
 		return "", fmt.Errorf("crypt5 segment truncated")
 	}
 	urlB64 := packed[1 : 1+segmentLen]

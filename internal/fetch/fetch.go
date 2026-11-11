@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -26,19 +27,74 @@ const (
 	// HappUserAgent is the Happ client user agent.
 	HappUserAgent = "Happ/3.26.0/Android/17771400994551771562"
 
-	maxBodyBytes = 64 << 20
+	maxBodyBytes = 8 << 20
 )
 
 var githubRawRe = regexp.MustCompile(`^https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([a-fA-F0-9]{40})(/.*)$`)
 
+// AllowPrivate disables SSRF protection. It exists for local subscription
+// servers and tests; enable with PARSER_ALLOW_PRIVATE=1.
+var AllowPrivate = os.Getenv("PARSER_ALLOW_PRIVATE") == "1"
+
+// safeDialContext resolves the host, rejects loopback/private/link-local
+// targets and dials the resolved IP directly to avoid DNS rebinding.
+func safeDialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	blocked := 0
+	for _, item := range ips {
+		if !AllowPrivate && isBlockedIP(item.IP) {
+			blocked++
+			continue
+		}
+		d := net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+		conn, err := d.DialContext(ctx, network, net.JoinHostPort(item.IP.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	if blocked > 0 {
+		return nil, fmt.Errorf("запрос к приватному адресу заблокирован: %s", host)
+	}
+	return nil, fmt.Errorf("не удалось разрешить %s", host)
+}
+
+func isBlockedIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	if v4 := ip.To4(); v4 != nil {
+		// 100.64.0.0/10 (CGNAT) and 0.0.0.0/8.
+		if v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
+			return true
+		}
+		if v4[0] == 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // Client is a shared, pooled HTTP client.
 var Client = &http.Client{
 	Transport: &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   5 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
+		Proxy:               http.ProxyFromEnvironment,
+		DialContext:         safeDialContext,
 		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
 		MaxIdleConns:        300,
 		MaxIdleConnsPerHost: 20,
@@ -53,8 +109,39 @@ var Client = &http.Client{
 	},
 }
 
-// Get performs a GET request and returns the response body as text.
+// SecureClient verifies TLS certificates. It is used for downloading and
+// verifying executables, where InsecureSkipVerify would enable MITM → RCE.
+var SecureClient = &http.Client{
+	Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           safeDialContext,
+		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		MaxIdleConns:          10,
+		IdleConnTimeout:       30 * time.Second,
+		ForceAttemptHTTP2:     true,
+	},
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return fmt.Errorf("too many redirects")
+		}
+		return nil
+	},
+}
+
+// Get performs a GET request with the compatibility client (TLS verification
+// disabled, matching the Python parser's verify=False).
 func Get(ctx context.Context, rawURL string, timeout time.Duration, headers map[string]string) (string, error) {
+	return getWithClient(ctx, Client, rawURL, timeout, headers)
+}
+
+// GetSecure performs a GET with certificate verification.
+func GetSecure(ctx context.Context, rawURL string, timeout time.Duration, headers map[string]string) (string, error) {
+	return getWithClient(ctx, SecureClient, rawURL, timeout, headers)
+}
+
+func getWithClient(ctx context.Context, client *http.Client, rawURL string, timeout time.Duration, headers map[string]string) (string, error) {
 	if timeout <= 0 {
 		timeout = 8 * time.Second
 	}
@@ -69,7 +156,7 @@ func Get(ctx context.Context, rawURL string, timeout time.Duration, headers map[
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := Client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -77,9 +164,12 @@ func Get(ctx context.Context, rawURL string, timeout time.Duration, headers map[
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
 	if err != nil {
 		return "", err
+	}
+	if len(body) > maxBodyBytes {
+		return "", fmt.Errorf("response body exceeds %d MB", maxBodyBytes>>20)
 	}
 	return string(body), nil
 }
@@ -102,10 +192,11 @@ func FetchSource(ctx context.Context, rawURL string, allowHapp bool, timeout tim
 		return happContent, true, nil
 	}
 	if err == nil {
-		err = fmt.Errorf("response too short")
-	}
-	if happErr != nil && err == nil {
-		err = happErr
+		if happErr != nil {
+			err = happErr
+		} else {
+			err = fmt.Errorf("response too short")
+		}
 	}
 	return "", false, err
 }
@@ -175,7 +266,7 @@ func headOK(ctx context.Context, rawURL string, timeout time.Duration) bool {
 		return false
 	}
 	req.Header.Set("User-Agent", DefaultUserAgent)
-	resp, err := Client.Do(req)
+	resp, err := SecureClient.Do(req)
 	if err != nil {
 		return false
 	}
