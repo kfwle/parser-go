@@ -55,6 +55,16 @@ func TestGenerateAllFormats(t *testing.T) {
 			t.Fatalf("duplicate proxy name %q", name)
 		}
 		names[name] = true
+		switch p["type"] {
+		case "vless":
+			if p["tls"] != true {
+				t.Fatalf("vless reality must have tls: true, got %v", p["tls"])
+			}
+		case "hysteria2":
+			if _, exists := p["tls"]; exists {
+				t.Fatalf("hysteria2 must not have a tls key: %v", p)
+			}
+		}
 	}
 	if len(clash.Rules) != 1 {
 		t.Fatalf("clash rules=%v", clash.Rules)

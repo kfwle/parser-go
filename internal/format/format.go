@@ -180,7 +180,7 @@ type clashProxy struct {
 	UDP               bool          `yaml:"udp"`
 	Encryption        string        `yaml:"encryption,omitempty"`
 	Network           string        `yaml:"network,omitempty"`
-	TLS               bool          `yaml:"tls"`
+	TLS               *bool         `yaml:"tls,omitempty"`
 	Servername        string        `yaml:"servername,omitempty"`
 	ClientFingerprint string        `yaml:"client-fingerprint,omitempty"`
 	RealityOpts       *clashReality `yaml:"reality-opts,omitempty"`
@@ -221,7 +221,8 @@ func toClash(ep *model.Endpoint, name string) (clashProxy, bool) {
 		p.Port = ep.Port
 		p.UUID = ep.ID
 		p.Encryption = "none"
-		p.TLS = ep.Security == "tls" || ep.Security == "reality"
+		tls := ep.Security == "tls" || ep.Security == "reality"
+		p.TLS = &tls
 		p.Servername = firstNonEmpty(ep.SNI, ep.Host)
 		p.ClientFingerprint = firstNonEmpty(ep.Fingerprint, "chrome")
 		if ep.ALPN != "" {
@@ -237,7 +238,8 @@ func toClash(ep *model.Endpoint, name string) (clashProxy, bool) {
 		p.Server = ep.Host
 		p.Port = ep.Port
 		p.Password = ep.ID
-		p.TLS = ep.Security == "tls"
+		tls := ep.Security == "tls"
+		p.TLS = &tls
 		p.Servername = firstNonEmpty(ep.SNI, ep.Host)
 		p.ClientFingerprint = ep.Fingerprint
 		if ep.ALPN != "" {

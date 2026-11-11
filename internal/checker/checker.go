@@ -28,7 +28,7 @@ import (
 
 const (
 	// CoreStartupTimeout is how long we wait for a SOCKS port to open.
-	CoreStartupTimeout = 5 * time.Second
+	CoreStartupTimeout = 3 * time.Second
 	// CoreKillDelay lets the OS release ports between attempts.
 	CoreKillDelay = 300 * time.Millisecond
 )
@@ -63,15 +63,16 @@ func New(paths *config.Paths, timeoutSeconds int) *Checker {
 //   - VLESS/Trojan are checked through Xray, unless check_via_xray is disabled,
 //     in which case they are accepted as-is.
 func (c *Checker) CheckConfig(ctx context.Context, raw, workDir, tempDir string, tcpPrefilter, viaXray bool) (bool, int) {
-	if tcpPrefilter {
+	ep, ok := extract.ParseConfig(raw)
+	if !ok {
+		return false, 0
+	}
+	// Hysteria2 runs over UDP: a TCP pre-filter would reject working configs.
+	if tcpPrefilter && !ep.IsHysteria2() {
 		host, port, ok := extract.HostPort(raw)
 		if !ok || !TCPAlive(ctx, host, port, minDuration(c.Timeout, 3*time.Second)) {
 			return false, 0
 		}
-	}
-	ep, ok := extract.ParseConfig(raw)
-	if !ok {
-		return false, 0
 	}
 	if ep.IsHysteria2() {
 		return c.checkHysteria2(ctx, raw, tempDir)
@@ -83,10 +84,11 @@ func (c *Checker) CheckConfig(ctx context.Context, raw, workDir, tempDir string,
 }
 
 func (c *Checker) checkXray(ctx context.Context, raw, workDir string) (bool, int) {
-	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		var ping int
+		ping := 0
+		started := false
 		err := c.WithXraySocks(ctx, raw, workDir, func(socksAddr string) error {
+			started = true
 			var pingErr error
 			ping, pingErr = c.Ping(ctx, socksAddr)
 			return pingErr
@@ -94,14 +96,15 @@ func (c *Checker) checkXray(ctx context.Context, raw, workDir string) (bool, int
 		if err == nil && ping > 0 {
 			return true, ping
 		}
-		if err != nil {
-			lastErr = err
-		}
 		if ctx.Err() != nil {
 			break
 		}
+		// If the core started but the proxy did not pass traffic, retrying the
+		// same config is pointless (matches the original Python behaviour).
+		if started {
+			return false, 0
+		}
 	}
-	_ = lastErr
 	return false, 0
 }
 
@@ -118,22 +121,20 @@ func (c *Checker) checkHysteria2(ctx context.Context, raw, tempDir string) (bool
 	return true, ping
 }
 
-// Ping measures latency through a local SOCKS5 proxy.
+// Ping measures latency through a local SOCKS5 proxy. The whole call is capped
+// by the per-config timeout, no matter how many fallback URLs are configured.
 func (c *Checker) Ping(ctx context.Context, socksAddr string) (int, error) {
+	deadlineCtx, cancel := context.WithTimeout(ctx, c.Timeout)
+	defer cancel()
 	var lastErr error
 	for _, testURL := range c.TestURLs {
+		if deadlineCtx.Err() != nil {
+			break
+		}
 		start := time.Now()
-		reqCtx, cancel := context.WithTimeout(ctx, c.Timeout)
-		err := func() error {
-			defer cancel()
-			body, err := HTTPGetViaSocks(reqCtx, socksAddr, testURL, c.Timeout)
-			if err != nil {
-				return err
-			}
-			_ = body
-			return nil
-		}()
+		body, err := HTTPGetViaSocks(deadlineCtx, socksAddr, testURL, c.Timeout)
 		if err == nil {
+			_ = body
 			return int(time.Since(start).Milliseconds()), nil
 		}
 		lastErr = err
