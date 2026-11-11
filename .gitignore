@@ -1,0 +1,25 @@
+# Runtime data
+/config.json
+/configs/
+/cores/
+/temp/
+/backups/
+
+# User data (created by the parser on first run)
+/sources/sources.txt
+/sources/tg.txt
+/sources/my_configs.txt
+/sources/ip_list.txt
+/sources/sni_list.txt
+
+# Go build artifacts
+/parser-go
+/parser-go.exe
+/dist/
+*.test
+*.out
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
